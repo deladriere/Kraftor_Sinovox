@@ -62,12 +62,12 @@ hello world
 !VOICE?
 !VOICE 0 5 5 0 10
 !STOP
-!SET R 0 hello world
+!SET R 0 0 hello world
 !GET R 0
 !PLAY R 0
 !ERASE R 0
 !DUMP R
-!SET F 0 ni3hao3
+!SET F 0 1 ni3hao3
 !GET F 0
 !PLAY F 0
 !ERASE F 0
@@ -75,9 +75,13 @@ hello world
 ```
 
 The five `!VOICE` values are language, pitch, speed, voice index and volume.
+Each `!SET` command includes the sentence language after the slot: `0` for
+English or `1` for Chinese/Pinyin. `!GET` and `!DUMP` replies use
+`!SENT STORE SLOT LANGUAGE TEXT`.
 RAM provides 20 volatile slots. An installed RC256 provides 100 persistent
-FRAM slots with the same header and 256-byte slot spacing used by the other
-Kraftor sentence-bank firmwares.
+FRAM slots with 256-byte spacing. Each slot stores one language byte, one
+length byte, up to 200 ASCII text bytes and 54 bytes reserved for later use.
+RAM slots store the same language information alongside their temporary text.
 
 ## MIDI
 
@@ -98,8 +102,10 @@ same channel selection applies to USB MIDI and DIN MIDI.
 FRAM slots 80-99 remain available through USB serial commands but cannot fit
 in the MIDI note-number range.
 
-Voice, speed, volume, language and pitch changes apply to the next utterance.
-They do not alter speech already in progress.
+Voice, speed, volume and pitch changes apply to the next utterance. Direct text
+uses the current language, while stored RAM and FRAM sentences always use the
+language saved with that slot. These controls do not alter speech already in
+progress.
 
 ## Build and upload
 

@@ -10,7 +10,7 @@
 
 namespace
 {
-constexpr char VERSION[] = "1.2";
+constexpr char VERSION[] = "1.3";
 constexpr char PRODUCT_MODEL[] = "SINOVOX";
 
 constexpr uint8_t GREEN_LED = 12;
@@ -38,12 +38,12 @@ constexpr uint8_t FRAM_MIDI_NOTE_SPAN = 128 - FRAM_FIRST_MIDI_NOTE;
 
 constexpr uint8_t FRAM_I2C_ADDRESS = 0x50;
 constexpr uint16_t FRAM_HEADER_ADDRESS = 0x0000;
-// Keep the same 256-byte stride and header as the other Kraftor speech builds.
+// Fixed 256-byte slot: language, length, up to 200 text bytes, then reserved.
 constexpr uint16_t FRAM_SLOT_BYTES = 256;
 constexpr uint16_t FRAM_SLOTS_BASE = 0x0100;
 constexpr uint8_t FRAM_MAGIC_HI = 0x4B; // K
 constexpr uint8_t FRAM_MAGIC_LO = 0x53; // S, compatible with Kraftor SAM
-constexpr uint8_t FRAM_VERSION = 0x01;
+constexpr uint8_t FRAM_VERSION = 0x02;
 constexpr size_t FRAM_I2C_CHUNK = 28;
 
 constexpr uint8_t DEFAULT_LANGUAGE = 1;
@@ -89,6 +89,7 @@ uint8_t voiceIndex = DEFAULT_VOICE;
 uint8_t voiceVolume = DEFAULT_VOLUME;
 
 char ramSentences[RAM_SLOTS][SENTENCE_MAX + 1];
+uint8_t ramLanguages[RAM_SLOTS];
 char serialBuffer[256];
 size_t serialIndex = 0;
 
@@ -178,17 +179,23 @@ static uint16_t framSlotAddress(uint8_t slot)
   return FRAM_SLOTS_BASE + static_cast<uint16_t>(slot) * FRAM_SLOT_BYTES;
 }
 
-static bool framReadSentence(uint8_t slot, char *out, size_t outSize)
+static bool framReadSentence(uint8_t slot, uint8_t *language,
+                             char *out, size_t outSize)
 {
-  if (!framPresent || slot >= FRAM_SLOTS || outSize == 0) return false;
+  if (!framPresent || slot >= FRAM_SLOTS || language == nullptr || outSize == 0) return false;
   out[0] = '\0';
+  *language = DEFAULT_LANGUAGE;
 
-  uint8_t length = 0;
-  if (!framReadBytes(framSlotAddress(slot), &length, 1)) return false;
+  uint8_t header[2] = {DEFAULT_LANGUAGE, 0};
+  if (!framReadBytes(framSlotAddress(slot), header, sizeof(header))) return false;
+  const uint8_t storedLanguage = header[0];
+  uint8_t length = header[1];
   if (length == 0 || length == 0xFF) return true;
+  if (storedLanguage > 1) return false;
+  *language = storedLanguage;
   if (length > SENTENCE_MAX) length = SENTENCE_MAX;
   if (length >= outSize) length = outSize - 1;
-  if (!framReadBytes(framSlotAddress(slot) + 1,
+  if (!framReadBytes(framSlotAddress(slot) + 2,
                      reinterpret_cast<uint8_t *>(out), length))
   {
     return false;
@@ -197,26 +204,28 @@ static bool framReadSentence(uint8_t slot, char *out, size_t outSize)
   return true;
 }
 
-static bool framWriteSentence(uint8_t slot, const char *text)
+static bool framWriteSentence(uint8_t slot, uint8_t language, const char *text)
 {
-  if (!framPresent || slot >= FRAM_SLOTS) return false;
+  if (!framPresent || slot >= FRAM_SLOTS || language > 1) return false;
   size_t length = strlen(text);
   if (length > SENTENCE_MAX) return false;
 
-  uint8_t buffer[SENTENCE_MAX + 1];
-  buffer[0] = static_cast<uint8_t>(length);
-  memcpy(buffer + 1, text, length);
-  if (!framWriteBytes(framSlotAddress(slot), buffer, length + 1)) return false;
+  uint8_t buffer[SENTENCE_MAX + 2];
+  buffer[0] = language;
+  buffer[1] = static_cast<uint8_t>(length);
+  memcpy(buffer + 2, text, length);
+  if (!framWriteBytes(framSlotAddress(slot), buffer, length + 2)) return false;
 
-  uint8_t verify = 0xFF;
-  return framReadBytes(framSlotAddress(slot), &verify, 1) && verify == length;
+  uint8_t verify[2] = {0xFF, 0xFF};
+  return framReadBytes(framSlotAddress(slot), verify, sizeof(verify)) &&
+         verify[0] == language && verify[1] == length;
 }
 
 static bool framEraseSentence(uint8_t slot)
 {
-  const uint8_t empty = 0;
+  const uint8_t empty[2] = {DEFAULT_LANGUAGE, 0};
   return framPresent && slot < FRAM_SLOTS &&
-         framWriteBytes(framSlotAddress(slot), &empty, 1);
+         framWriteBytes(framSlotAddress(slot), empty, sizeof(empty));
 }
 
 static bool framHeaderValid()
@@ -336,13 +345,18 @@ static bool playRamSlot(uint8_t slot)
     oledLine(1, "(empty)");
     return false;
   }
-  return speakText(ramSentences[slot]);
+  const uint8_t previousLanguage = voiceLanguage;
+  voiceLanguage = ramLanguages[slot];
+  const bool played = speakText(ramSentences[slot]);
+  voiceLanguage = previousLanguage;
+  return played;
 }
 
 static bool playFramSlot(uint8_t slot)
 {
+  uint8_t language = DEFAULT_LANGUAGE;
   char text[SENTENCE_MAX + 1];
-  if (!framReadSentence(slot, text, sizeof(text)))
+  if (!framReadSentence(slot, &language, text, sizeof(text)))
   {
     replyError("read");
     return false;
@@ -353,7 +367,11 @@ static bool playFramSlot(uint8_t slot)
     oledLine(1, "(empty)");
     return false;
   }
-  return speakText(text);
+  const uint8_t previousLanguage = voiceLanguage;
+  voiceLanguage = language;
+  const bool played = speakText(text);
+  voiceLanguage = previousLanguage;
+  return played;
 }
 
 static void handleNoteOn(byte channel, byte note, byte velocity)
@@ -495,12 +513,14 @@ static void replyVoice()
   Serial.println(voiceVolume);
 }
 
-static void replySentence(char store, int slot, const char *text)
+static void replySentence(char store, int slot, uint8_t language, const char *text)
 {
   Serial.print("!SENT ");
   Serial.print(store);
   Serial.print(' ');
   Serial.print(slot);
+  Serial.print(' ');
+  Serial.print(language);
   Serial.print(' ');
   Serial.println(text);
 }
@@ -510,24 +530,26 @@ static void commandGet(char store, int slot)
   if (store == 'R')
   {
     if (slot < 0 || slot >= RAM_SLOTS) { replyError("range"); return; }
-    replySentence(store, slot, ramSentences[slot]);
+    replySentence(store, slot, ramLanguages[slot], ramSentences[slot]);
     return;
   }
   if (store == 'F')
   {
     if (!framPresent) { replyError("nofram"); return; }
     if (slot < 0 || slot >= FRAM_SLOTS) { replyError("range"); return; }
+    uint8_t language = DEFAULT_LANGUAGE;
     char text[SENTENCE_MAX + 1];
-    if (!framReadSentence(slot, text, sizeof(text))) { replyError("read"); return; }
-    replySentence(store, slot, text);
+    if (!framReadSentence(slot, &language, text, sizeof(text))) { replyError("read"); return; }
+    replySentence(store, slot, language, text);
     return;
   }
   replyError("store");
 }
 
-static void commandSet(char store, int slot, const char *text)
+static void commandSet(char store, int slot, int language, const char *text)
 {
   const size_t length = strlen(text);
+  if (language < 0 || language > 1) { replyError("language"); return; }
   if (length > SENTENCE_MAX) { replyError("too-long"); return; }
   if (!textIsAscii(text)) { replyError("ascii-required"); return; }
 
@@ -535,6 +557,7 @@ static void commandSet(char store, int slot, const char *text)
   {
     if (slot < 0 || slot >= RAM_SLOTS) { replyError("range"); return; }
     memcpy(ramSentences[slot], text, length + 1);
+    ramLanguages[slot] = static_cast<uint8_t>(language);
     Serial.println("!OK");
     return;
   }
@@ -542,7 +565,7 @@ static void commandSet(char store, int slot, const char *text)
   {
     if (!framPresent) { replyError("nofram"); return; }
     if (slot < 0 || slot >= FRAM_SLOTS) { replyError("range"); return; }
-    if (!framWriteSentence(slot, text)) { replyError("write"); return; }
+    if (!framWriteSentence(slot, static_cast<uint8_t>(language), text)) { replyError("write"); return; }
     Serial.println("!OK");
     return;
   }
@@ -555,6 +578,7 @@ static void commandErase(char store, int slot)
   {
     if (slot < 0 || slot >= RAM_SLOTS) { replyError("range"); return; }
     ramSentences[slot][0] = '\0';
+    ramLanguages[slot] = DEFAULT_LANGUAGE;
     Serial.println("!OK");
     return;
   }
@@ -603,7 +627,7 @@ static void commandDump(char store)
   {
     for (uint8_t slot = 0; slot < RAM_SLOTS; ++slot)
     {
-      replySentence(store, slot, ramSentences[slot]);
+      replySentence(store, slot, ramLanguages[slot], ramSentences[slot]);
       serviceMidi();
     }
     Serial.println("!END R");
@@ -615,8 +639,9 @@ static void commandDump(char store)
     char text[SENTENCE_MAX + 1];
     for (uint8_t slot = 0; slot < FRAM_SLOTS; ++slot)
     {
-      if (!framReadSentence(slot, text, sizeof(text))) text[0] = '\0';
-      replySentence(store, slot, text);
+      uint8_t language = DEFAULT_LANGUAGE;
+      if (!framReadSentence(slot, &language, text, sizeof(text))) text[0] = '\0';
+      replySentence(store, slot, language, text);
       serviceMidi();
     }
     Serial.println("!END F");
@@ -679,8 +704,9 @@ static void handleCommand(const char *line)
     cursor += 4;
     const char store = parseStore(&cursor);
     const int slot = parseInt(&cursor);
+    const int language = parseInt(&cursor);
     skipSpaces(&cursor);
-    commandSet(store, slot, cursor);
+    commandSet(store, slot, language, cursor);
     return;
   }
   if (strncmp(cursor, "ERASE ", 6) == 0)
@@ -777,6 +803,7 @@ void setup()
   for (uint8_t slot = 0; slot < RAM_SLOTS; ++slot)
   {
     ramSentences[slot][0] = '\0';
+    ramLanguages[slot] = DEFAULT_LANGUAGE;
   }
 
   // The OLED is present on most units, but the no-display product variant must
