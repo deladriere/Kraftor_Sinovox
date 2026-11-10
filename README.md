@@ -1,5 +1,12 @@
 # Kraftor Sinovox
 
+SAMD21 firmware v1.3 for Polaxis Kraftor with a Sino Vox board.
+
+- [Download the UF2 firmware](https://github.com/deladriere/Kraftor_Sinovox/releases/latest)
+- [Open Sinovox Designer](https://deladriere.github.io/Sinovox_designer/)
+- [Designer user manual](https://deladriere.github.io/Sinovox_designer/user_manual.html)
+- [Kraftor guide](https://www.polaxis.be/sinovox-serial-midi-for-kraftor/)
+
 Kraftor Sinovox is firmware for Kraftor driving a Sinovox speech module.
 It accepts Pinyin or English text over USB
 serial, stores sentences in RAM or optional I2C FRAM, and recalls them from
@@ -109,6 +116,13 @@ progress.
 
 ## Build and upload
 
+The project includes the Kraftor board variant under `variants/kraftor`.
+It defines the mikroBUS `Serial5` UART, so no changes to the installed
+Arduino framework are needed. PlatformIO and library versions are pinned.
+
+Back up existing FRAM phrases before changing firmware: v1.3 initializes
+FRAM when its header does not match this firmware's format.
+
 From this directory:
 
 ```sh
@@ -116,6 +130,21 @@ pio run
 pio run -t upload
 ```
 
-The post-build helper also creates `firmware.uf2`. If a compatible UF2 volume
-is mounted, it attempts to copy the file there; otherwise it leaves the UF2 in
-the project directory for manual copying.
+The post-build helper creates `Kraftor_Sinovox_1.3.uf2` at application address `0x2000`.
+A normal `pio run` does not write to connected hardware. To install, enter
+Kraftor's UF2 bootloader and copy `Kraftor_Sinovox_1.3.uf2` to its drive, or explicitly
+run `pio run -t upload`.
+
+## Release validation
+
+The publication build is checked against the existing v1.3 UF2 payload.
+This release packages the existing firmware; no new physical speech, MIDI,
+or FRAM test has been performed as part of publication.
+
+## Third-party components
+
+The Kraftor variant derives from Arduino's SAMD variant and retains its
+LGPL-2.1-or-later notices. `uf2conv.py` and `uf2families.json` are the existing
+Microsoft UF2 conversion tools and retain their original notices.
+Arduino core and MIDI libraries are installed by PlatformIO under their
+respective upstream licences.
